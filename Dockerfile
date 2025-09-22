@@ -1,26 +1,27 @@
-# --- Build the official Conductor "server" image from source ---
-# This mirrors the docs: build docker/server/Dockerfile from the repo.
-# Pin to a tag/branch to avoid surprises. Example: v3.15.0 (adjust if needed).
+# --- Build Conductor OSS server from source (no Docker-in-Docker) ---
+FROM eclipse-temurin:17-jdk AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 
-ARG CONDUCTOR_REF=v3.15.0
+# Pin to a known tag; you can bump later. Check repo tags if needed.
+ARG CONDUCTOR_REF=v3.21.19
+RUN git clone https://github.com/conductor-oss/conductor.git . \
+ && git checkout ${CONDUCTOR_REF}
 
-FROM alpine:3.19 AS fetch
-RUN apk add --no-cache git
-WORKDIR /src
-RUN git clone https://github.com/conductor-oss/conductor.git . && \
-    git checkout ${CONDUCTOR_REF}
+# Build ONLY the server jar; skip tests for faster CI
+RUN ./gradlew :server:bootJar -x test
 
-# Build the server image using the official Dockerfile
-# The Dockerfile path is docker/server/Dockerfile inside the repo.
-FROM docker:27.0-cli AS dind
-WORKDIR /src
-COPY --from=fetch /src /src
-# Build inner image named conductor:server (as per docs)
-RUN docker build -t conductor:server -f docker/server/Dockerfile /src
+# --- Runtime image ---
+FROM eclipse-temurin:17-jre
+WORKDIR /app
 
-# --- Final: run the built server image as our container ---
-# Extract layers from the just-built image and run it
-FROM conductor:server
+# Copy the spring-boot fat jar
+COPY --from=builder /app/server/build/libs/*.jar /app/conductor-server.jar
 
-# Conductor server image already exposes 8080 and starts via its entrypoint.
-# Railway will hit 0.0.0.0:$PORT; we set SERVER_PORT/PORT via env in Railway.
+# Railway expects the app to listen on 0.0.0.0:$PORT. We'll use 8080.
+ENV PORT=8080
+ENV SERVER_PORT=8080
+EXPOSE 8080
+
+# Spring Boot respects SERVER_PORT
+ENTRYPOINT ["java","-jar","/app/conductor-server.jar"]
